@@ -22,6 +22,15 @@ Thumbs.db
 
 ## Claude Code
 .claude/
+.omc/
+
+## Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
 
 ## Database
 *.db
