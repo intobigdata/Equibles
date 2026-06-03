@@ -9,8 +9,9 @@ x-embedding-environment: &embedding-environment
 services:
   db:
     image: paradedb/paradedb:latest
+    restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -29,11 +30,12 @@ services:
       start_period: 30s
 
   mcp:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: src/Equibles.Mcp.Server/Dockerfile
     ports:
-      - "8081:8080"
+      - "${MCP_PORT:-8081}:8080"
     environment:
       <<: *embedding-environment
       ConnectionStrings__DefaultConnection: "Host=db;Database=equibles;Username=postgres;Password=postgres"
@@ -45,11 +47,12 @@ services:
         condition: service_healthy
 
   web:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: src/Equibles.Web/Dockerfile
     ports:
-      - "8080:8080"
+      - "${WEB_PORT:-8080}:8080"
     environment:
       <<: *embedding-environment
       ConnectionStrings__DefaultConnection: "Host=db;Database=equibles;Username=postgres;Password=postgres"
@@ -76,6 +79,7 @@ services:
         condition: service_healthy
 
   worker:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: src/Equibles.Worker.Host/Dockerfile
