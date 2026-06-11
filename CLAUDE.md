@@ -13,6 +13,8 @@ Host ports are set via `.env` (`WEB_PORT`/`MCP_PORT`/`DB_PORT` in `docker-compos
 ## Ops notes
 
 - **FINRA API credential expires 2027-06-02.** On lapse, `FinraClient.GetAccessToken()` returns `400` and FINRA imports stop. Rotate at developer.finra.org, update `Finra__ClientId`/`Finra__ClientSecret` in `.env`, then `docker compose up -d worker` (recreate — `restart` won't reload env vars). See `docs/TODO.md`.
+- **Web tabs clamp history to `Worker__MinSyncDate` (default `2020-01-01`).** Upstream PRs #3638/#3639/#3640 (merged 2026-06-10) made the price, short-data, holdings, insider, and congressional tabs hide anything *displayed* before the configured minimum sync date. ⚠️ **This is display-only — the data is still in the DB.** So if a stock's web history looks like it starts in 2020 but you know we ingested deeper (SEC docs back to ~2000, the pre-2002 dot-com archive, etc.), that's the clamp, not missing data. To surface the full depth in the UI, set `Worker__MinSyncDate=2000-01-01` in `.env` and recreate web (`docker compose up -d web`). MCP/DB reads are **not** clamped — only the web tabs.
+- **XBRL dimensional-facts backfill is forced ON locally** via `XbrlCapture__BackfillEnabled=true` in `.env` (2026-06-11). Upstream #3622 defaults it OFF (their historical sweep drained); this machine never ran the sweep, so it's on to populate `FinancialFactDimension` for the back-catalogue (powers MCP `GetRevenueBreakdown`). Once it drains here (every doc `Captured`/`NotPresent`, cycle selects 0), it's safe to flip back off and recreate the worker.
 
 ## Git workflow
 
