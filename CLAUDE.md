@@ -28,6 +28,8 @@ git pull                              # rebases my local commits onto upstream's
 git push --force-with-lease fork main # back up to my fork after a pull rewrote my commits
 ```
 
+**Command phrase — "update equibles":** when John says *"update equibles"* (or "update the fork"), run the two steps above as one action: `git pull` first, then **only on a clean rebase** `git push --force-with-lease fork main`. **If the pull hits a merge/rebase conflict, STOP** — resolve or report it, do **not** force-push a half-rebased state to the fork. Report what came in from upstream after the pull.
+
 - Use `--force-with-lease`, not plain `push`: a pull replays my commits with new hashes, so the fork needs the rewritten history. `--force-with-lease` is the safe force — it refuses if the fork has work I haven't seen.
 - Upstream squash-merges everything, so `git branch --merged` lies about what's landed; check `gh pr list --repo daniel3303/Equibles` or grep `main`'s log instead.
 
