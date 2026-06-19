@@ -46,3 +46,4 @@ node_modules/
 *.local
 appsettings.*.json
 !appsettings.json
+.gstack/
