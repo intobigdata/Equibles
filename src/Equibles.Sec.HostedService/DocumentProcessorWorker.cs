@@ -2,11 +2,14 @@ using Equibles.Errors.BusinessLogic;
 using Equibles.Errors.Data.Models;
 using Equibles.Sec.HostedService.Services;
 using Equibles.Worker;
+using Microsoft.Extensions.Configuration;
 
 namespace Equibles.Sec.HostedService;
 
 public class DocumentProcessorWorker : BaseScraperWorker
 {
+    private readonly IConfiguration _configuration;
+
     protected override string WorkerName => "Document processor";
     protected override TimeSpan SleepInterval => TimeSpan.FromSeconds(15);
     protected override ErrorSource ErrorSource => ErrorSource.DocumentProcessor;
@@ -31,9 +34,28 @@ public class DocumentProcessorWorker : BaseScraperWorker
     public DocumentProcessorWorker(
         ILogger<DocumentProcessorWorker> logger,
         IServiceScopeFactory scopeFactory,
-        ErrorReporter errorReporter
+        ErrorReporter errorReporter,
+        IConfiguration configuration
     )
-        : base(logger, scopeFactory, errorReporter) { }
+        : base(logger, scopeFactory, errorReporter)
+    {
+        _configuration = configuration;
+    }
+
+    // Lets an operator disable the chunk/embedding pipeline without removing its
+    // registration — set DocumentProcessor:Enabled=false. Defaults to enabled, so
+    // returning false here stops the worker before its loop ever runs.
+    protected override bool ValidateConfiguration()
+    {
+        var enabled = _configuration.GetValue("DocumentProcessor:Enabled", true);
+        if (!enabled)
+        {
+            Logger.LogWarning(
+                "Document processor disabled via DocumentProcessor:Enabled=false; skipping."
+            );
+        }
+        return enabled;
+    }
 
     protected override async Task DoWork(CancellationToken stoppingToken)
     {

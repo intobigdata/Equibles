@@ -54,9 +54,17 @@ builder.Services.AddSerilog(config =>
 Equibles.Plugins.PluginLoader.LoadAll();
 
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+// Optional global command timeout for the worker's financial context. Defaults to
+// Npgsql's 30s when unset; raise it (Worker:CommandTimeoutSeconds) for heavy
+// backfill/chunking queries that legitimately run long under DB load, so a slow
+// query waits rather than failing fast and crashing the hosted worker.
+var commandTimeoutSeconds = builder.Configuration.GetValue<int?>("Worker:CommandTimeoutSeconds");
 builder.Services.AddEquiblesFinancialDbContext(
     connectionString,
-    modules => modules.AddAllModules()
+    modules => modules.AddAllModules(),
+    commandTimeout: commandTimeoutSeconds.HasValue
+        ? TimeSpan.FromSeconds(commandTimeoutSeconds.Value)
+        : null
 );
 builder.Services.AddAllRepositories();
 
