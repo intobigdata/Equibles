@@ -39,7 +39,20 @@ public class InsiderFilingReprocessManager
     // and SaveChanges runs once per batch, so a smaller size means a throttled or
     // interrupted run still persists what it managed to fetch rather than losing a
     // large in-flight batch.
-    private const int BatchSize = 32;
+    //
+    // FORK-LOCAL DEVIATION (upstream is 32) — do NOT include in an upstream PR.
+    // The selection query above is O(table): ParserVersion < Current matches ~26% of
+    // 9.08M rows, so the planner seq-scans all 8.65 GB, then DISTINCTs 2.36M rows to
+    // take BatchSize accessions. With no cursor, that whole scan re-runs once per
+    // batch — so wall-clock is (pending accessions / BatchSize) x ~4 s. At 32 against
+    // 788,655 pending accessions that is ~24,600 scans (~27 h) and 89% of all block
+    // reads on this deployment. At 512 it is ~1,540 scans (~1.7 h).
+    // This does not fix the O(n^2) shape, it only runs the bad query 16x less often.
+    // Sized at 512 rather than higher because SaveChanges is per batch: the change
+    // tracker holds the whole batch's graph (~3.2 InsiderTransaction rows/accession),
+    // and upstream's NportFilingReprocessManager docstring records a parser-version
+    // bump OOM-crashing every worker lane exactly this way.
+    private const int BatchSize = 512;
     private const int CloseLookbackDays = 10;
 
     // After this many failed fetch/parse attempts a filing is marked NotPresent and
