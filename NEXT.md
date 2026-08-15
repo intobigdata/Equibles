@@ -1,83 +1,57 @@
 # NEXT.md — Equibles continuation
 
-*Written August 11, 2026. Replaces prior contents each session. Fork-local ops notes live in `CLAUDE.md`; this file is the active work queue.*
+*Written August 15, 2026. Replaces prior contents each session. Fork-local ops notes live in `CLAUDE.md`; this file is the active work queue.*
 
 ---
 
 ## TL;DR — state after this session
 
-1. **Pulled 31 upstream commits** (clean rebase, 18 local commits replayed, now 0 behind). ⚠️ **Fork backup still PENDING** — see *Do this first*.
-2. **Problem 1 mitigated locally, not fixed.** `BatchSize` 32 → 512 in `InsiderFilingReprocessManager`. Measured **4.6× faster per accession**; backlog ETA **~28 h → ~6.4 h**. The O(n²) shape is untouched — this only runs the bad query less often.
-3. **Problem 2 (577 GB of blobs) untouched** — deliberately deferred this session. Still 100% `StorageProvider='Database'`, DB still 908 GB.
+1. **Problem 1 is FIXED UPSTREAM and deployed locally.** Issue [#4374](https://github.com/daniel3303/Equibles/issues/4374) → `4ac6e726` (PR #4386), ~22 h turnaround. Verified on this box: the selection went from **8.47 M rows / 8.05 M buffers / 7,819 ms** to **64 rows / 26 buffers / 0.095 ms**. The fork-local `BatchSize` deviation is **reverted**; that file is byte-identical to upstream again.
+2. **Pulled 24 upstream commits** (clean rebase, 20 local commits replayed, 0 behind), fork pushed, stack rebuilt, 4 migrations applied.
+3. **Problem 2 (577 GB of blobs) still untouched** — the only large open item. Still 100% `StorageProvider='Database'`.
 
 ---
 
 ## Do this first
 
-✅ Fork pushed 2026-08-12 (`9253704f` → `28be6ee9`, forced update after the rebase).
-✅ Upstream issue filed: **[#4374](https://github.com/daniel3303/Equibles/issues/4374)**.
-
-Still uncommitted: `CLAUDE.md`, `InsiderFilingReprocessManager.cs` (the BatchSize deviation), and this file.
+Nothing blocking. Problem 2 below is the next substantive piece of work.
 
 ---
 
-## Problem 1 — `InsiderFilingReprocessManager` O(n²) reprocess query
+## Problem 1 — reprocess selection — ✅ RESOLVED, no action needed
 
-### Status: mitigated locally; upstream issue [#4374](https://github.com/daniel3303/Equibles/issues/4374) filed 2026-08-12
+**Fixed upstream by `4ac6e726` (PR #4386), deployed here 2026-08-15.** Kept only as the
+reference case for how this fork's report → fix loop worked, and because the *shape* recurs.
 
-`BatchSize` 32 → 512 (`InsiderFilingReprocessManager.cs:55`), marked in-code as
-`FORK-LOCAL DEVIATION — do NOT include in an upstream PR`.
+The fix is a composite `(ParserVersion, AccessionNumber)` index **plus** the code change that
+makes it usable: the loop takes `MinAsync` of pending versions then filters
+`ParserVersion == oldest` — an **equality**, not a range — so the leading column is a single
+seek and `Unique` + `Limit` stream in `AccessionNumber` order without a sort.
 
-### Measured, not predicted (544 s paired window, post-deploy)
+⚠️ **The index alone would NOT have fixed it.** `ParserVersion < 6` spans several values, so a
+composite index orders `AccessionNumber` only *within* each version. The original issue draft
+proposed the index without the equality rewrite; a `/codex` review caught the gap before
+filing, and the issue shipped with that limitation stated rather than glossed. Upstream then
+closed it properly. **Lesson: when proposing an index for a `DISTINCT … LIMIT`, check whether
+the predicate is an equality on the leading column — if it is a range, the ordering does not
+survive.**
+
+Verified after deploy:
 
 | | Before | After |
 |---|---:|---:|
-| Selection query mean | 4.006 s/call | **13.84 s/call** |
-| Accessions per call | 32 | **512.0** (17,920 ÷ 35 — exact) |
-| **Cost per accession** | **125.2 ms** | **27.0 ms** |
+| Access path | Index Scan + post-`Filter` | **Index Only Scan**, `Index Cond` |
+| Rows examined | 8,473,867 | **64** |
+| Buffers | 8,046,802 | **26** |
+| Execution time | 7,819.825 ms | **0.095 ms** |
 
-⚠️ **No DB-CPU claim.** Post-deploy the DB container was observed at both 75% and 126% within
-20 minutes, and the fact-reimport / fund-rescore re-enrollments below add concurrent load, so
-there is no clean before/after. The defensible metrics are cost-per-accession and 512.0/call.
+Index `IX_InsiderTransaction_ParserVersion_AccessionNumber`, 190 MB, built `CONCURRENTLY`,
+`indisvalid = t`. Backlog fully drained beforehand (0 rows below current parser version;
+9,083,252 rows all at v6, total *up* 689 from ingest — no data was ever lost).
 
-**Gain is 4.6×, NOT the 16× first estimated.** Correction: the estimate assumed the
-selection query costs the same regardless of batch size. It does not — `DISTINCT … LIMIT n`
-stops early once *n* distinct values are collected, so a bigger batch scans further into the
-table before it can stop. Most of the nominal 16× is eaten by the longer scan.
-
-⚠️ **Expect the per-call cost to keep rising as it drains.** As v5 rows get sparser the scan
-must go further to find 512 distinct accessions. ~6.4 h is a floor, not a promise.
-
-Backlog at time of writing: **759,983** distinct accessions pending (from 802,319).
-
-⚠️ **Do not run `SELECT … GROUP BY "ParserVersion"` casually to check progress** — that
-verification query itself costs ~15.6 s and ~500 k block reads. Prefer:
-`SELECT count(DISTINCT "AccessionNumber") FROM "InsiderTransaction" WHERE "ParserVersion" < 6;`
-
-### Upstream issue — REFRAMED, do not use the old draft
-
-The prior draft said to *lead with the `ChunkDocumentBatch` persisted-cursor precedent*.
-**That framing is now wrong.** Upstream's `#4360` (`54675d90`, landed **2026-08-11 — the same
-day as this session**, in this pull) rewrote 260 lines of the sibling
-`NportFilingReprocessManager` and **deliberately kept the no-cursor design** — the
-`// No DB cursor:` comment survived the rewrite, only reworded. Arguing for a persisted cursor
-now argues against a choice the maintainer re-affirmed *today*.
-
-**What upstream actually did in #4360 is the template:** it paged the selection query by id,
-*"32 per query instead of one ordered query per filing"* — i.e. it attacked the same problem by
-**running the expensive selection fewer times**. That is the identical lever to BatchSize, in
-the maintainer's own idiom.
-
-Points to make:
-1. Evidence: 63,910 s total, 26.7–27.1 B of ~29 B DB-wide `blks_read` (≈89%), 4.0 s mean × ~15.8 k calls.
-2. Repro condition is **row count, not config**: 9.08 M `InsiderTransaction` rows, 2.32 M at
-   `ParserVersion < 6` (26% ⇒ planner correctly seq-scans 8.65 GB), 759,983 distinct pending.
-3. **Acknowledge the deliberate design** — quote the collation comment, do not propose a naive
-   keyset. Option A (work-queue table) needs no ordering at all and sidesteps the objection.
-4. **Lead with #4360's own paging remedy**, then note that paging alone is sublinear (measured
-   4.6× for a 16× batch increase), so it mitigates rather than fixes.
-5. Note the sibling `NportFilingReprocessManager` now has the honest attempt ledger but still
-   carries the same shape.
+⚠️ **Cheap backlog check** (do NOT use a `GROUP BY ParserVersion` — that costs ~15 s and
+~500 k block reads):
+`SELECT count(*) FROM "InsiderTransaction" WHERE "ParserVersion" < 6;`
 
 ---
 
@@ -116,19 +90,21 @@ Optional follow-on: OCR the ~1.22 M text-poor exhibit images (170 GB) into **its
 
 ---
 
-## In flight from this pull — watch, don't panic
+## In flight — watch, don't panic
 
-Two migrations added version columns defaulting to `0` while the code constants are `2`, which
-**re-enrolls the corpus for recompute**:
+**From the 2026-08-15 pull** (4 migrations, all applied cleanly; web healthy in 19 s):
+`OptimizeInsiderReprocessSelection` (the #4374 index, built `CONCURRENTLY`, valid),
+`AddStockQuarterlyListingActivity` (new table), `BackfillHistoricalTickerAliases`
+(hardcoded 21-row insert, not a sweep), `AddYahooEnrichmentCheckpoint` (one `CommonStock`
+column). None heavy. No new `.env` gate in this pull — the short-data estimate feature
+(`452d234d`) is an unregistered interface (`IShortInterestEstimateSource`), not a config knob.
 
-- `AddFinancialFactsImporterVersion` → `FinancialFactsImportService.CurrentImporterVersion = 2`;
-  **8,220** `FinancialFactsSyncStatus` rows re-import. This is the *intent* of the fact-quality
-  fixes in this pull (`568b517d`, `b9868e56`, `1af22e8f`).
-- `VersionFundScorePriceReturnBasis` → `FundScore.CurrentCalculationVersion = 2`; **12,636**
-  fund scores rescore. ⚠️ Driven by `FundScoringWorker`, the ~9.9 GB spike worker (~1.7 GB
-  margin). Worker was 2.79 GiB and healthy 20 min post-deploy, but this is the OOM risk to watch.
+**Carried over from the 2026-08-11 pull** — two version bumps re-enrolled the corpus:
 
-All 6 migrations applied cleanly; web healthy in 29 s.
+- Financial-facts re-import — ✅ **COMPLETE** (8,220/8,220 at `ImporterVersion = 2`).
+- Fund rescore — 🔄 **still draining**: 7,460 at `CalculationVersion = 2`, **2,803 still at 0**
+  (was 6,288 pending on 2026-08-12). ⚠️ Driven by `FundScoringWorker`, the ~9.9 GB spike worker
+  (~1.7 GB margin). No OOM observed across four days, but it is the standing memory risk.
 
 **`RepairChunkReportingDates` was a false alarm — do not re-investigate.** The planner's
 `rows=40583581` is its default selectivity guess for `IS DISTINCT FROM`. **Measured 0 actual
@@ -141,10 +117,13 @@ cast. It scanned and updated nothing.
 ## New, unexplained — low priority
 
 **FINRA short-volume `403 Forbidden`** on `FinraClient.DownloadDailyShortVolumeFile` for
-historical days (observed 01/09/2025 and 12/05/2018). **Only 2 occurrences in 10 min** —
-sporadic, not systematic. ⚠️ This is **not** the credential-expiry mode `CLAUDE.md` documents
-(that is a `400` from `GetAccessToken()`, and the credential is valid to 2027-06-02). Unexplained;
-re-check whether it grows before investigating.
+historical days (first seen 2026-08-11 on 01/09/2025 and 12/05/2018). **Persistent but low-rate:
+~2 occurrences per 10–15 min, unchanged on 2026-08-15 across four days and two full redeploys.**
+Not growing, so still low priority — but it is *not* transient, so "wait and see" has now been
+tried and answered. ⚠️ This is **not** the credential-expiry mode `CLAUDE.md` documents (that is a
+`400` from `GetAccessToken()`, and the credential is valid to 2027-06-02). Next step if it ever
+matters: capture which dates fail and whether FINRA simply has no file for them (a 403 on a
+non-existent archive object would explain a permanent, harmless low rate).
 
 ---
 
