@@ -20,8 +20,51 @@ Nothing blocking. Problem 2 below is the next substantive piece of work.
 
 ## Problem 1 — reprocess selection — ✅ RESOLVED, no action needed
 
-**Fixed upstream by `4ac6e726` (PR #4386), deployed here 2026-08-15.** Kept only as the
-reference case for how this fork's report → fix loop worked, and because the *shape* recurs.
+**Fixed upstream by `4ac6e726` (PR #4386), deployed here 2026-08-15.** Kept as the reference
+case for how this fork's report → fix loop worked, and because the *shape* recurs.
+
+### What the problem was
+
+**Symptom:** `equibles-db-1` pinned at ~100–116% CPU (one full core) continuously for weeks,
+with ~54 TB read / ~24.8 TB written of cumulative container block I/O. Nothing was visibly
+broken — no errors, no crash, no data loss — the box was just permanently busy, and the insider
+reprocess backlog barely moved. Worker logs showed nothing because the container emits **WRN and
+above only**, and the reprocess progress lines are `LogInformation`.
+
+**How it was found:** `pg_stat_statements`, not logs. One query accounted for **~89% of all
+block reads database-wide** (26.7 B of 29.1 B), 16.9 h of cumulative execution, 4.0 s mean ×
+~15.8 k calls — roughly 12× the next-most-expensive query.
+
+**The query** (`InsiderFilingReprocessManager.Run`) selected work with a cursorless
+`DISTINCT … LIMIT`:
+
+```csharp
+.Where(t => t.ParserVersion < InsiderTransaction.CurrentParserVersion)   // range predicate
+.Select(t => t.AccessionNumber).Distinct().Take(BatchSize)
+```
+
+**Mechanism:** to satisfy `DISTINCT … LIMIT` with early termination the planner walked
+`IX_InsiderTransaction_AccessionNumber_TransactionOrder` (which supplies the ordering), then
+applied `ParserVersion` as a **post-index `Filter`** because that column is absent from the
+index. Every already-processed row was read and discarded before the scan reached pending work
+— **8,473,803 rows discarded (~93% of the table) to produce one 512-accession batch.** With no
+cursor this restarted from scratch every batch, so total work scaled with corpus size, not
+batch size.
+
+**Scale:** 9.08 M `InsiderTransaction` rows / 8,798 MB; 802,319 distinct accessions pending at
+peak; upstream `BatchSize = 32` ⇒ ~25,000 such re-reads queued (~28 h of DB time).
+
+⚠️ **Two of my own early calls here were wrong, both corrected by measurement — worth
+remembering as failure modes:**
+1. The original diagnosis said the planner *seq-scanned* because the predicate matched ~26% of
+   rows. `EXPLAIN` showed an **index scan with a post-filter** instead. The distinction mattered:
+   the real fix is about which column is in the ordering index, not about scan type.
+2. I predicted raising `BatchSize` 32→512 would give ~16× (batch ratio). **Measured 4.6×**, decaying
+   toward ~1.6× — a larger `DISTINCT … LIMIT n` walks further before it can stop, so the
+   selection cost rises with batch size and eats most of the nominal gain. That mitigation was
+   later reverted once upstream fixed the query.
+
+### The fix
 
 The fix is a composite `(ParserVersion, AccessionNumber)` index **plus** the code change that
 makes it usable: the loop takes `MinAsync` of pending versions then filters
